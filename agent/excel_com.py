@@ -17,20 +17,32 @@ def excel_session(visible: bool = True) -> Iterator:
     """Context-managed Excel.Application. Auto-enables macros, suppresses alerts."""
     log = get_logger()
     app = win32.Dispatch("Excel.Application")
-    prev_security = app.AutomationSecurity
+    # AutomationSecurity is not always exposed by late-bound dynamic dispatch
+    # (seen on Python 3.14 + pywin32). If we can't touch it, Trust Center must
+    # be configured instead (see SETUP.md). Don't let this block the run.
+    prev_security = None
+    try:
+        prev_security = app.AutomationSecurity
+        app.AutomationSecurity = MSO_AUTO_SECURITY_LOW
+        sec_note = "AutomationSecurity=Low"
+    except AttributeError:
+        sec_note = "AutomationSecurity unavailable (relying on Trust Center)"
     prev_alerts = app.DisplayAlerts
     prev_screen = app.ScreenUpdating
-    app.AutomationSecurity = MSO_AUTO_SECURITY_LOW
     app.Visible = visible
     app.DisplayAlerts = False
-    log.debug("Excel session opened (visible=%s, AutomationSecurity=Low)", visible)
+    log.debug("Excel session opened (visible=%s, %s)", visible, sec_note)
     try:
         yield app
     finally:
         try:
             app.ScreenUpdating = prev_screen
             app.DisplayAlerts = prev_alerts
-            app.AutomationSecurity = prev_security
+            if prev_security is not None:
+                try:
+                    app.AutomationSecurity = prev_security
+                except AttributeError:
+                    pass
             app.Quit()
             log.debug("Excel session closed")
         except Exception as e:
