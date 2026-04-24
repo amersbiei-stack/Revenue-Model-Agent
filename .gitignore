@@ -28,10 +28,10 @@ Archive/
 
 # ============================================================
 # Machine-specific configuration
-# Each machine has its own config.json with local paths.
-# config.example.json IS committed as the template.
+# config.example.json is the template.
+# config.json is tracked per user's request (private repo).
+# If this repo ever becomes public, re-add "config.json" below.
 # ============================================================
-config.json
 
 # ============================================================
 # Ad-hoc inspection scripts and one-off dumps

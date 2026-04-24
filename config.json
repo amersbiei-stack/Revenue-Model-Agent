@@ -1,0 +1,16 @@
+{
+  "_comment": "Machine-specific settings for the Revenue Model agent. See SETUP.md for what to change on a new machine.",
+
+  "project_root": "C:\\Users\\amers\\Downloads\\Revenue Model",
+  "archive_dir": null,
+  "log_dir": null,
+
+  "email_recipient": "asbiei@prophix.com",
+
+  "prophix_wait_seconds": 600,
+
+  "file_prefix": "Revenue Model - ",
+  "file_suffix": " (Internal)",
+  "file_ext": ".xlsm",
+  "file_date_format": "%m%d%Y"
+}
