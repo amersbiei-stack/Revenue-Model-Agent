@@ -89,7 +89,7 @@ def main() -> int:
 
     # === STEP 4 ===
     if only in (None, 4) and not args.skip_step4:
-        step4_prophix.run(wb_path, manual_confirm=True)
+        step4_prophix.run(wb_path)
     if only == 4:
         return 0
 

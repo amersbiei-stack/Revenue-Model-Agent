@@ -31,7 +31,7 @@ From the project folder:
 py -m pip install -r requirements.txt
 ```
 
-Installs `pywin32`, `python-dateutil`, `matplotlib`, `numpy`. The batch file refuses to run if `py` is not on PATH.
+Installs `pywin32`, `pywinauto`, `python-dateutil`, `matplotlib`, `numpy`. `pywinauto` drives the Prophix Analyzer pane in Step 4 (no manual click needed). The batch file refuses to run if `py` is not on PATH.
 
 ## Step 3 — Create `config.json`
 
@@ -94,7 +94,7 @@ This touches no state (opens the workbook read-only, checks Prophix tabs are pop
 
 ## Step 7 — First real run
 
-Double-click `Run Revenue Model Agent.bat`. When the console pauses at Step 4, launch Prophix in Excel (`Alt+N`, `Y`, `1`), click Refresh, then press Enter in the console. Wait ~10 min, then check Outlook Drafts.
+Double-click `Run Revenue Model Agent.bat`. Step 4 is now fully automated: the agent opens Excel, activates `Units Bookings DV`, presses `Alt+N+Y+1` itself, clicks **Refresh → All Sheets** in the Prophix Analyzer pane, then sleeps ~10 min. Do not touch the keyboard or mouse while Step 4 runs — it will steal focus on Excel and any input from you could derail the keystroke chord. When the agent finishes, check Outlook Drafts.
 
 ---
 
