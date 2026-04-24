@@ -54,26 +54,63 @@ def _analyzer_pane(main_window, timeout: float):
 
 def _open_analyzer_pane(app, main_window, log) -> None:
     """If the pane isn't already open, send Alt+N+Y+1 and wait for it."""
-    try:
-        pane = main_window.child_window(
-            title_re="Prophix Analyzer.*",
-            control_type="Pane",
-        )
-        if pane.exists(timeout=1):
-            log.info("Prophix Analyzer pane already open")
-            return
-    except Exception:
-        pass
+    from pywinauto.keyboard import send_keys
+    from pywinauto.timings import TimeoutError as PWATimeoutError
 
-    log.info("Sending Alt+N+Y+1 to open Prophix Analyzer pane")
-    # Split the chord so Excel's ribbon has time to cycle KeyTip state.
-    app.SendKeys("%")
-    time.sleep(0.4)
-    app.SendKeys("n")
-    time.sleep(0.4)
-    app.SendKeys("y1")
-    _analyzer_pane(main_window, timeout=20)
-    log.info("Prophix Analyzer pane opened")
+    pane = main_window.child_window(
+        title_re="Prophix Analyzer.*",
+        control_type="Pane",
+    )
+    if pane.exists(timeout=1):
+        log.info("Prophix Analyzer pane already open")
+        return
+
+    # Two-attempt retry. pywinauto's send_keys drives OS-level keyboard
+    # input (unlike Excel.Application.SendKeys, which quietly fails for
+    # ribbon KeyTip navigation). Focus must belong to Excel for ribbon
+    # shortcuts to register.
+    for attempt in range(1, 3):
+        try:
+            main_window.set_focus()
+        except Exception as e:
+            log.warning("Excel set_focus failed (attempt %d): %s", attempt, e)
+        time.sleep(0.5)
+
+        log.info("Sending Alt+N, then Y1 (attempt %d)", attempt)
+        # Alt+N opens the Insert ribbon tab. After it's open, the tab's
+        # KeyTips take over — Y1 is a two-key tip, no Alt needed.
+        send_keys("%n")
+        time.sleep(0.8)
+        send_keys("y1")
+
+        try:
+            pane.wait("exists visible", timeout=15)
+            log.info("Prophix Analyzer pane opened")
+            return
+        except PWATimeoutError:
+            log.warning(
+                "Prophix Analyzer pane did not appear within 15s "
+                "(attempt %d/2)", attempt,
+            )
+
+    # Dump what UIA can see so we can debug the next run.
+    log.error("Could not open Prophix Analyzer pane via Alt+N+Y+1. "
+              "Dumping top-level children of the Excel window:")
+    try:
+        for child in main_window.children()[:40]:
+            try:
+                log.error("  title=%r class=%s",
+                          child.window_text(),
+                          child.friendly_class_name())
+            except Exception:
+                pass
+    except Exception as e:
+        log.error("  (could not enumerate children: %s)", e)
+    raise RuntimeError(
+        "Step 4: Prophix Analyzer pane never opened after Alt+N+Y+1. "
+        "Confirm the shortcut still applies and that Excel keeps focus "
+        "during Step 4 (do not click away while the agent runs)."
+    )
 
 
 def _click_refresh_all_sheets(main_window, log) -> None:
