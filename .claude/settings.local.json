@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -c \"import openpyxl; print\\(openpyxl.__version__\\)\")",
+      "Bash(py -m pip install openpyxl --quiet)",
+      "Bash(py inspect_bookings.py)",
+      "Bash(py -m pip install oletools --quiet)",
+      "Bash(py inspect_vba.py)",
+      "Bash(grep -v \"UserWarning\\\\|warn\\(msg\\)\\\\|^$\")",
+      "Bash(py dump_vba.py)",
+      "Bash(py inspect_cols.py)",
+      "Bash(py verify_plan.py)",
+      "Bash(py inspect_step5.py)",
+      "Bash(pandoc --version)",
+      "Bash(python -c \"import docx; print\\(docx.__version__\\)\")",
+      "Bash(pip install *)",
+      "Bash(py -c \"import docx; print\\(docx.__version__\\)\")",
+      "Bash(py -m pip install python-docx)",
+      "Bash(py md_to_docx.py)",
+      "Bash(py -c ' *)",
+      "Bash(grep -n \"sharepoint\\\\|SharePoint\\\\|OneDrive\\\\|\\\\\\\\\\\\\\\\Archive\\\\|Archive\\\\\\\\\\\\\\\\\\\\|backup.*folder\\\\|BACKUP_FOLDER\\\\|ARCHIVE_FOLDER\\\\|Const.*=\" vba_dump.txt)",
+      "Bash(py -m pip install pywin32 matplotlib pillow python-dateutil)",
+      "Bash(py *)",
+      "Bash(cp config.json config.json.bak)",
+      "Bash(mv config.json config.json.hidden)",
+      "Bash(grep -v \"~\\\\$\\\\|vba_dump\\\\|dump_\\\\|inspect_\\\\|verify_\\\\|md_to_docx\")",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}

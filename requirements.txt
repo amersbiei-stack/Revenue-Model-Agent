@@ -1,0 +1,13 @@
+# Revenue Model Rollover Agent — third-party dependencies
+# Install: py -m pip install -r requirements.txt
+# Python: 3.10+ (agent uses `X | Y` union syntax, dataclasses with kw_only, etc.)
+
+# Excel + Outlook COM automation (Steps 3-8)
+pywin32>=306
+
+# Month arithmetic (date_utils.py — MoM / QTD / YTD labels)
+python-dateutil>=2.9
+
+# Clustered bar chart PNG generation (Step 7 email embeds)
+matplotlib>=3.8
+numpy>=1.26

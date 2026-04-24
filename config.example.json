@@ -1,0 +1,16 @@
+{
+  "_comment": "Template for a fresh machine. Copy this file to config.json and fill in the values marked <REPLACE_ME>. See SETUP.md.",
+
+  "project_root": "<REPLACE_ME: absolute path to the Revenue Model folder, e.g. C:\\Users\\yourname\\Documents\\Revenue Model>",
+  "archive_dir": null,
+  "log_dir": null,
+
+  "email_recipient": "<REPLACE_ME: email address that receives failure/variance alerts, e.g. asbiei@prophix.com>",
+
+  "prophix_wait_seconds": 600,
+
+  "file_prefix": "Revenue Model - ",
+  "file_suffix": " (Internal)",
+  "file_ext": ".xlsm",
+  "file_date_format": "%m%d%Y"
+}

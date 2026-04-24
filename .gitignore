@@ -1,0 +1,60 @@
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ============================================================
+# Run artifacts (regenerated every run)
+# ============================================================
+agent/logs/
+agent-backup/__pycache__/
+
+# ============================================================
+# Excel / Office lock files
+# ============================================================
+~$*
+
+# ============================================================
+# Live workbooks and backups
+# These are 10MB binaries that change monthly. The agent produces
+# them; they don't belong in source control.
+# ============================================================
+Revenue Model - *.xlsm
+Archive/
+
+# ============================================================
+# Machine-specific configuration
+# Each machine has its own config.json with local paths.
+# config.example.json IS committed as the template.
+# ============================================================
+config.json
+
+# ============================================================
+# Ad-hoc inspection scripts and one-off dumps
+# These were used during the initial workbook audit. Safe to
+# uncomment if you want them versioned; excluded by default.
+# ============================================================
+vba_dump.txt
+# dump_vba.py
+# inspect_bookings.py
+# inspect_cols.py
+# inspect_step5.py
+# inspect_vba.py
+# verify_plan.py
+# md_to_docx.py
+
+# ============================================================
+# Generated chart sample (regenerated on demand)
+# ============================================================
+agent/sample_chart.png
+
+# ============================================================
+# OS cruft
+# ============================================================
+Thumbs.db
+.DS_Store
+desktop.ini
