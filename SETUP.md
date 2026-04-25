@@ -31,7 +31,7 @@ From the project folder:
 py -m pip install -r requirements.txt
 ```
 
-Installs `pywin32`, `pywinauto`, `python-dateutil`, `matplotlib`, `numpy`. `pywinauto` drives the Prophix Analyzer pane in Step 4 (no manual click needed). The batch file refuses to run if `py` is not on PATH.
+Installs `pywin32`, `python-dateutil`, `matplotlib`, `numpy`. The batch file refuses to run if `py` is not on PATH.
 
 ## Step 3 — Create `config.json`
 
@@ -94,7 +94,17 @@ This touches no state (opens the workbook read-only, checks Prophix tabs are pop
 
 ## Step 7 — First real run
 
-Double-click `Run Revenue Model Agent.bat`. Step 4 is now fully automated: the agent opens Excel, activates `Units Bookings DV`, presses `Alt+N+Y+1` itself, clicks **Refresh → All Sheets** in the Prophix Analyzer pane, then sleeps ~10 min. Do not touch the keyboard or mouse while Step 4 runs — it will steal focus on Excel and any input from you could derail the keystroke chord. When the agent finishes, check Outlook Drafts.
+Double-click `Run Revenue Model Agent.bat`. Steps 1 and 3 run automatically (~2 min).
+
+When the console prints **STEP 4 — MANUAL ACTION REQUIRED** and pauses, switch to the open Excel window and:
+
+1. Press **Alt + N + Y + 1** to open the Prophix Analyzer task pane.
+2. In the pane's bottom toolbar, click the arrow next to the **Refresh** button and choose **All Sheets**.
+3. Once the refresh has **started** (you'll see Excel cycle through the 5 DV tabs), switch to the console and press **Enter**.
+
+The agent then sleeps 10 minutes and runs Steps 5/6/7 automatically. When it finishes, check Outlook Drafts for the executive-summary email and send it after a quick review.
+
+> Why this step is manual: Prophix Analyzer CV2 is an Office Web Add-in (Office.js task pane) hosted by Prophix; it runs in a sandboxed WebView and has no programmatic API callable from VBA, COM, or external automation. A user click is the only way to trigger its refresh. Steps 1, 3, 5, 6, 7 are fully automated.
 
 ---
 

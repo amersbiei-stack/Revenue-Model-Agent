@@ -2,12 +2,8 @@
 # Install: py -m pip install -r requirements.txt
 # Python: 3.10+ (agent uses `X | Y` union syntax, dataclasses with kw_only, etc.)
 
-# Excel + Outlook COM automation (Steps 3-8)
+# Excel + Outlook COM automation (Steps 3, 5, 6, 7)
 pywin32>=306
-
-# UI Automation for Step 4 (drives the Prophix Analyzer CV2 task pane:
-# opens pane via Alt+N+Y+1, clicks Refresh -> All Sheets)
-pywinauto>=0.6.8
 
 # Month arithmetic (date_utils.py — MoM / QTD / YTD labels)
 python-dateutil>=2.9
