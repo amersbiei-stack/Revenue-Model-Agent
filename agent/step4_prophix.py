@@ -77,94 +77,182 @@ def _ensure_excel_maximized(app, log) -> None:
     time.sleep(0.8)
 
 
-def _analyzer_pane(main_window, timeout: float):
-    """Return the pywinauto wrapper for the Prophix Analyzer pane."""
-    return main_window.child_window(
-        title_re="Prophix Analyzer.*",
-        control_type="Pane",
-        found_index=0,
-    ).wait("exists visible", timeout=timeout)
+# (legacy _analyzer_pane removed — pywinauto 0.6.9 on Python 3.14 rejects
+# title_re. See _wait_for_pane / _find_pane_descendant below for the
+# title_re-free replacements.)
 
 
 def _activate_insert_tab(main_window, log) -> bool:
-    """Select the Insert ribbon tab via UIA so its buttons are reachable."""
+    """Click the Insert ribbon tab via UIA so its buttons populate.
+
+    We physically click_input() the tab rather than calling .select() —
+    select() was returning success without actually switching tabs on
+    some installs (UIA tree never showed any Insert-tab buttons).
+    """
     for kwargs in (
         {"title": "Insert", "control_type": "TabItem"},
-        {"title_re": "Insert.*", "control_type": "TabItem"},
-        {"title": "Insert", "control_type": "Button"},
+        {"title": "Insert"},
     ):
         try:
             tab = main_window.child_window(**kwargs)
             if not tab.exists(timeout=2):
                 continue
             try:
-                tab.select()
-            except Exception:
                 tab.click_input()
-            time.sleep(0.6)
-            log.info("Insert tab activated via UIA (%s)", kwargs)
+            except Exception:
+                try:
+                    tab.select()
+                except Exception as e:
+                    log.warning("Both click_input and select failed: %s", e)
+                    continue
+            time.sleep(1.5)  # let the Insert tab render its buttons
+            log.info("Insert tab clicked via UIA (%s)", kwargs)
             return True
         except Exception:
             continue
-    log.warning("Could not activate Insert tab via UIA")
+    log.warning("Could not click Insert tab via UIA")
     return False
 
 
 def _find_prophix_analyzer_button(main_window, log):
-    """Find the leftmost visible 'Analyzer' ribbon button (Prophix CV2).
+    """Enumerate all descendants and filter for a visible 'Analyzer' button.
 
-    The Prophix group on the Insert tab has Analyzer / Contributor /
-    Analyzer buttons; the CV2 one is the leftmost Analyzer. We filter
-    for buttons with a real on-screen rectangle (collapsed/overflow
-    buttons have zero width) and pick the lowest X coordinate.
+    Avoids pywinauto's title_re kwarg (unsupported on 0.6.9). We enumerate
+    all descendants, keep anything whose display text contains 'Analyzer'
+    and has a non-zero rectangle, then pick the leftmost — the Prophix
+    CV2 button (which sits to the left of Contributor and the duplicate
+    second Analyzer in the ribbon Prophix group).
     """
-    strategies = (
-        ("exact",  {"title": "Analyzer",               "control_type": "Button"}),
-        ("regex1", {"title_re": r"^Analyzer$",         "control_type": "Button"}),
-        ("regex2", {"title_re": r".*Analyzer.*",       "control_type": "Button"}),
-    )
-    for name, kwargs in strategies:
+    # Pull every descendant once; cheaper than multiple searches.
+    try:
+        all_descendants = main_window.descendants()
+    except Exception as e:
+        log.warning("Could not enumerate descendants: %s", e)
+        return None
+
+    candidates = []
+    for d in all_descendants:
         try:
-            matches = main_window.descendants(**kwargs)
-        except Exception as e:
-            log.warning("Descendant search '%s' failed: %s", name, e)
+            title = d.window_text() or ""
+        except Exception:
             continue
-        if not matches:
+        if "Analyzer" not in title:
+            continue
+        try:
+            rect = d.rectangle()
+            if rect.width() <= 0 or rect.height() <= 0:
+                continue
+        except Exception:
+            continue
+        try:
+            ctype = d.element_info.control_type
+        except Exception:
+            ctype = "?"
+        candidates.append((rect.left, d, title, ctype))
+
+    log.info("Analyzer candidates (visible, by X):")
+    candidates.sort(key=lambda t: t[0])
+    for left, d, title, ctype in candidates[:10]:
+        log.info("  left=%d title=%r ctype=%s", left, title, ctype)
+
+    if not candidates:
+        return None
+    return candidates[0][1]
+
+
+def _try_open_via_com_addin(app, log) -> bool:
+    """Try to open the Prophix Analyzer pane by invoking the COM add-in.
+
+    Prophix Analyzer CV2 registers itself in Application.COMAddIns. If
+    its automation Object exposes a show-pane method, this bypasses the
+    ribbon entirely (no UIA, no keyboard). Pure COM.
+    """
+    try:
+        addins = app.COMAddIns
+    except Exception as e:
+        log.warning("Could not read COMAddIns: %s", e)
+        return False
+
+    try:
+        count = addins.Count
+    except Exception:
+        count = 0
+    log.info("COMAddIns available: %d", count)
+
+    for i in range(1, count + 1):
+        try:
+            addin = addins.Item(i)
+            progid = str(getattr(addin, "ProgID", "") or "")
+            desc = str(getattr(addin, "Description", "") or "")
+            connected = bool(getattr(addin, "Connect", False))
+        except Exception as e:
+            log.warning("  [%d] inspection failed: %s", i, e)
+            continue
+        log.info("  [%d] ProgID=%s | Desc=%s | Connected=%s",
+                 i, progid, desc, connected)
+        if "prophix" not in progid.lower() and "prophix" not in desc.lower():
+            continue
+        if "analyzer" not in progid.lower() and "analyzer" not in desc.lower():
+            # Prophix Contributor is also a COM addin; skip non-analyzer ones.
             continue
 
-        visible = []
-        for m in matches:
-            try:
-                r = m.rectangle()
-                if r.width() > 0 and r.height() > 0:
-                    visible.append((r.left, m))
-            except Exception:
-                pass
-        log.info("Strategy '%s' found %d match(es), %d visible",
-                 name, len(matches), len(visible))
-        if not visible:
-            continue
-        visible.sort(key=lambda t: t[0])
-        chosen = visible[0][1]
+        log.info("Found Prophix Analyzer addin: %s", progid)
         try:
-            log.info("Chose Analyzer button at rect=%s", chosen.rectangle())
-        except Exception:
-            pass
-        return chosen
-    return None
+            if not connected:
+                addin.Connect = True
+                time.sleep(1.0)
+                log.info("Connected %s", progid)
+            obj = addin.Object
+        except Exception as e:
+            log.warning("Could not connect/read Object on %s: %s", progid, e)
+            continue
+        if obj is None:
+            log.info("%s exposes no automation Object", progid)
+            continue
+
+        for method_name in (
+            "ShowPane", "ShowTaskPane", "OpenTaskPane",
+            "OpenAnalyzer", "OpenPane", "Show", "Activate",
+            "ToggleTaskPane", "ToggleAnalyzer",
+        ):
+            try:
+                if hasattr(obj, method_name):
+                    log.info("Invoking %s.%s()", progid, method_name)
+                    getattr(obj, method_name)()
+                    return True
+            except Exception as e:
+                log.warning("%s.%s() failed: %s", progid, method_name, e)
+    return False
+
+
+def _pane_is_open(main_window) -> bool:
+    """Poll the UIA tree for any descendant whose title starts with
+    'Prophix Analyzer'. Avoids title_re (broken on pywinauto 0.6.9 +
+    Python 3.14)."""
+    try:
+        for d in main_window.descendants():
+            try:
+                title = d.window_text() or ""
+            except Exception:
+                continue
+            if title.startswith("Prophix Analyzer"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _wait_for_pane(main_window, log, timeout: float = 12.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _pane_is_open(main_window):
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def _click_via_uia(main_window, log) -> bool:
-    """Primary path: click the Analyzer ribbon button via UIA Invoke.
-
-    Returns True if the Prophix Analyzer pane appears within 12s.
-    """
-    from pywinauto.timings import TimeoutError as PWATimeoutError
-
-    pane = main_window.child_window(
-        title_re="Prophix Analyzer.*", control_type="Pane",
-    )
-
+    """Click the Analyzer ribbon button via UIA Invoke."""
     for attempt in range(1, 3):
         try:
             main_window.set_focus()
@@ -182,7 +270,7 @@ def _click_via_uia(main_window, log) -> bool:
         log.info("Clicking Analyzer ribbon button via UIA (attempt %d/2)", attempt)
         clicked = False
         try:
-            btn.invoke()  # UIA Invoke pattern — a real click without mouse
+            btn.invoke()
             clicked = True
         except Exception as e:
             log.warning("btn.invoke() failed: %s; trying click_input", e)
@@ -195,13 +283,10 @@ def _click_via_uia(main_window, log) -> bool:
         if not clicked:
             continue
 
-        try:
-            pane.wait("exists visible", timeout=12)
+        if _wait_for_pane(main_window, log, timeout=12):
             log.info("Prophix Analyzer pane opened (UIA click)")
             return True
-        except PWATimeoutError:
-            log.warning("Pane didn't appear after UIA click (attempt %d/2)",
-                        attempt)
+        log.warning("Pane didn't appear after UIA click (attempt %d/2)", attempt)
 
     return False
 
@@ -209,11 +294,6 @@ def _click_via_uia(main_window, log) -> bool:
 def _click_via_keyboard(main_window, log) -> bool:
     """Fallback path: Alt+N+Y+1 via OS-level keystrokes."""
     from pywinauto.keyboard import send_keys
-    from pywinauto.timings import TimeoutError as PWATimeoutError
-
-    pane = main_window.child_window(
-        title_re="Prophix Analyzer.*", control_type="Pane",
-    )
 
     for attempt in range(1, 3):
         try:
@@ -229,39 +309,47 @@ def _click_via_keyboard(main_window, log) -> bool:
         time.sleep(0.35)
         send_keys("1", pause=0.2)
 
-        try:
-            pane.wait("exists visible", timeout=12)
+        if _wait_for_pane(main_window, log, timeout=12):
             log.info("Prophix Analyzer pane opened (keyboard)")
             return True
-        except PWATimeoutError:
-            log.warning("Pane didn't appear after keystrokes (attempt %d/2)",
-                        attempt)
-            try:
-                send_keys("{ESC}{ESC}", pause=0.1)
-            except Exception:
-                pass
-            time.sleep(1.0)
+        log.warning("Pane didn't appear after keystrokes (attempt %d/2)", attempt)
+        try:
+            send_keys("{ESC}{ESC}", pause=0.1)
+        except Exception:
+            pass
+        time.sleep(1.0)
     return False
 
 
 def _open_analyzer_pane(app, main_window, log) -> None:
-    """Open the Prophix Analyzer pane. UIA click first, keyboard fallback."""
-    pane = main_window.child_window(
-        title_re="Prophix Analyzer.*", control_type="Pane",
-    )
-    if pane.exists(timeout=1):
+    """Open the Prophix Analyzer pane.
+
+    Order of attempts (most reliable first):
+      1. Direct COM-add-in invocation (no UI at all).
+      2. UIA click on the Insert > Analyzer ribbon button.
+      3. Alt+N+Y+1 keystrokes.
+    """
+    if _pane_is_open(main_window):
         log.info("Prophix Analyzer pane already open")
         return
 
+    log.info("Trying COM add-in invocation first (no UI)")
+    if _try_open_via_com_addin(app, log):
+        if _wait_for_pane(main_window, log, timeout=15):
+            log.info("Prophix Analyzer pane opened (COM add-in)")
+            return
+        log.warning("COM add-in invoked but pane never appeared")
+
+    log.info("Trying UIA click on Analyzer ribbon button")
     if _click_via_uia(main_window, log):
         return
 
-    log.info("UIA click could not open the pane; falling back to Alt+N+Y+1")
+    log.info("UIA click failed; falling back to Alt+N+Y+1 keystrokes")
     if _click_via_keyboard(main_window, log):
         return
 
-    # Both paths failed — dump diagnostics so the next run can be tuned.
-    log.error("Could not open Prophix Analyzer pane by UIA click or keyboard.")
+    # All paths failed — dump diagnostics so the next run can be tuned.
+    log.error("Could not open Prophix Analyzer pane by COM, UIA, or keyboard.")
     log.error("Top-level children of the Excel window:")
     try:
         for child in main_window.children()[:40]:
@@ -289,39 +377,53 @@ def _open_analyzer_pane(app, main_window, log) -> None:
     )
 
 
-def _click_refresh_all_sheets(main_window, log) -> None:
-    """Expand the pane's Refresh split-button and click 'All Sheets'."""
-    pane = _analyzer_pane(main_window, timeout=10)
-
-    # The refresh control at the bottom of the pane is a split-button named
-    # "Refresh". Try a few selector shapes in case the UIA tree differs by
-    # Prophix build.
-    candidates = [
-        {"title": "Refresh", "control_type": "SplitButton"},
-        {"title_re": "Refresh.*", "control_type": "SplitButton"},
-        {"title": "Refresh", "control_type": "Button"},
-        {"title_re": "Refresh.*", "control_type": "Button"},
-    ]
-    refresh_btn = None
-    for kwargs in candidates:
+def _find_pane_descendant(main_window, log):
+    """Return a wrapper for whichever descendant has the Prophix pane title."""
+    for d in main_window.descendants():
         try:
-            candidate = pane.child_window(**kwargs)
-            if candidate.exists(timeout=2):
-                refresh_btn = candidate
-                break
+            title = d.window_text() or ""
         except Exception:
             continue
+        if title.startswith("Prophix Analyzer"):
+            return d
+    return None
+
+
+def _click_refresh_all_sheets(main_window, log) -> None:
+    """Find the pane's Refresh split-button by walking descendants, then
+    invoke it and click 'All Sheets'. Avoids title_re entirely."""
+    pane = _find_pane_descendant(main_window, log)
+    if pane is None:
+        raise RuntimeError(
+            "Step 4: Prophix Analyzer pane is not in the UIA tree."
+        )
+
+    refresh_btn = None
+    for d in pane.descendants():
+        try:
+            title = (d.window_text() or "").strip()
+        except Exception:
+            continue
+        if title == "Refresh" or title.startswith("Refresh"):
+            try:
+                if d.rectangle().width() > 0:
+                    refresh_btn = d
+                    log.info("Found Refresh control: title=%r ctype=%s",
+                             title, d.element_info.control_type)
+                    break
+            except Exception:
+                refresh_btn = d
+                break
     if refresh_btn is None:
         raise RuntimeError(
             "Step 4: could not locate the 'Refresh' control in the Prophix "
-            "Analyzer pane. UI tree may have changed in this Prophix build."
+            "Analyzer pane."
         )
 
     log.info("Expanding Refresh split-button dropdown")
     try:
-        refresh_btn.expand()  # standard UIA ExpandCollapse pattern
+        refresh_btn.expand()
     except Exception:
-        # Split buttons sometimes only respond to a mouse click on the arrow.
         try:
             refresh_btn.click_input()
         except Exception as e:
@@ -329,24 +431,35 @@ def _click_refresh_all_sheets(main_window, log) -> None:
                 f"Step 4: could not open the Refresh dropdown: {e}"
             ) from e
 
-    time.sleep(0.5)
+    time.sleep(0.6)
 
-    # "All Sheets" is a MenuItem that appears on the desktop, not inside the
-    # pane, once the split-button is expanded.
-    all_sheets_selectors = [
-        {"title": "All Sheets", "control_type": "MenuItem"},
-        {"title": "All Sheets", "control_type": "ListItem"},
-        {"title": "All Sheets"},
-    ]
+    # "All Sheets" appears as a desktop-level menu item once the split-button
+    # is expanded. Walk the desktop's descendants, not just main_window's.
     target = None
-    for kwargs in all_sheets_selectors:
-        try:
-            candidate = main_window.child_window(**kwargs)
-            if candidate.exists(timeout=3):
-                target = candidate
-                break
-        except Exception:
-            continue
+    try:
+        from pywinauto import Desktop
+        desktop = Desktop(backend="uia")
+        for d in desktop.descendants():
+            try:
+                if (d.window_text() or "").strip() == "All Sheets":
+                    if d.rectangle().width() > 0:
+                        target = d
+                        break
+            except Exception:
+                continue
+    except Exception as e:
+        log.warning("Could not enumerate Desktop for All Sheets: %s", e)
+
+    if target is None:
+        # Fallback: search main_window descendants directly.
+        for d in main_window.descendants():
+            try:
+                if (d.window_text() or "").strip() == "All Sheets":
+                    target = d
+                    break
+            except Exception:
+                continue
+
     if target is None:
         raise RuntimeError(
             "Step 4: Refresh dropdown opened but 'All Sheets' item not found."
