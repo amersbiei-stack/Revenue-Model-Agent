@@ -1,9 +1,11 @@
 """Excel COM helpers. Open workbook, run macro, read ranges with label-check guards."""
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 import win32com.client as win32
+from win32com.client import gencache
 
 from agent.logging_setup import get_logger
 
@@ -12,11 +14,50 @@ MSO_AUTO_SECURITY_LOW = 1     # auto-enable macros (required for our .xlsm)
 MSO_AUTO_SECURITY_DISABLE = 3
 
 
+def _make_excel_app(log):
+    """Create Excel.Application via early binding (gencache.EnsureDispatch)
+    so AutomationSecurity and other typed properties are reachable. Fall
+    back to late-bound Dispatch if EnsureDispatch fails (Python 3.14 +
+    bleeding-edge pywin32 sometimes can't generate the cache)."""
+    try:
+        app = gencache.EnsureDispatch("Excel.Application")
+        log.debug("Excel.Application via gencache.EnsureDispatch (early binding)")
+        return app
+    except Exception as e:
+        log.warning("EnsureDispatch failed (%s); falling back to Dispatch", e)
+        return win32.Dispatch("Excel.Application")
+
+
+def unblock_file(path: Path, log) -> None:
+    """Remove the Zone.Identifier alternate data stream from a file.
+
+    Office's 'Block macros from the Internet' policy disables VBA in any
+    .xlsm carrying Mark of the Web — even when AutomationSecurity=Low.
+    Stripping the ADS lets the macro run again. Idempotent: silently
+    no-op if there's no MOTW to remove.
+    """
+    ads_path = f"{path}:Zone.Identifier"
+    try:
+        # `del` on the ADS path; using cmd.exe because del's ADS-aware.
+        result = subprocess.run(
+            ["cmd", "/c", "del", "/f", ads_path],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            log.info("Stripped Mark of the Web from %s", path.name)
+        else:
+            # rc=2 typically means the ADS didn't exist; not an error.
+            log.debug("unblock-file: rc=%d stderr=%r", result.returncode,
+                      result.stderr.strip())
+    except Exception as e:
+        log.warning("unblock-file failed (continuing anyway): %s", e)
+
+
 @contextmanager
 def excel_session(visible: bool = True) -> Iterator:
     """Context-managed Excel.Application. Auto-enables macros, suppresses alerts."""
     log = get_logger()
-    app = win32.Dispatch("Excel.Application")
+    app = _make_excel_app(log)
     # AutomationSecurity is not always exposed by late-bound dynamic dispatch
     # (seen on Python 3.14 + pywin32). If we can't touch it, Trust Center must
     # be configured instead (see SETUP.md). Don't let this block the run.

@@ -38,6 +38,12 @@ def run(workbook_path: Path,
     file_date = date_utils.parse_filename(workbook_path)
     date_math_guard(file_date, expected_close_year, expected_close_month)
 
+    # Strip Mark of the Web before opening. Office's 'Block macros from
+    # the Internet' policy disables VBA in any .xlsm carrying MOTW — even
+    # when AutomationSecurity=Low — and OneDrive-synced files sometimes
+    # acquire MOTW after sync round-trips.
+    excel_com.unblock_file(workbook_path, log)
+
     with excel_com.excel_session(visible=True) as app:
         with excel_com.open_workbook(app, workbook_path,
                                      read_only=False, save_on_close=True):
