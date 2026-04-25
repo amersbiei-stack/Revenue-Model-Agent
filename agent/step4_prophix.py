@@ -65,33 +65,43 @@ def _open_analyzer_pane(app, main_window, log) -> None:
         log.info("Prophix Analyzer pane already open")
         return
 
-    # Two-attempt retry. pywinauto's send_keys drives OS-level keyboard
+    # Three-attempt retry. pywinauto's send_keys drives OS-level keyboard
     # input (unlike Excel.Application.SendKeys, which quietly fails for
     # ribbon KeyTip navigation). Focus must belong to Excel for ribbon
     # shortcuts to register.
-    for attempt in range(1, 3):
+    for attempt in range(1, 4):
         try:
             main_window.set_focus()
         except Exception as e:
             log.warning("Excel set_focus failed (attempt %d): %s", attempt, e)
-        time.sleep(0.5)
-
-        log.info("Sending Alt+N, then Y1 (attempt %d)", attempt)
-        # Alt+N opens the Insert ribbon tab. After it's open, the tab's
-        # KeyTips take over — Y1 is a two-key tip, no Alt needed.
-        send_keys("%n")
         time.sleep(0.8)
-        send_keys("y1")
+
+        log.info("Sending Alt+N, then Y, then 1 (attempt %d/3)", attempt)
+        # Explicit VK_MENU down/up makes the Alt boundary unambiguous —
+        # the %n shorthand sometimes releases Alt before 'n' registers.
+        send_keys("{VK_MENU down}n{VK_MENU up}", pause=0.15)
+        time.sleep(1.5)  # let the Insert tab render its command KeyTips
+        # Two-char KeyTips are matched by Excel's state machine after each
+        # key; split Y and 1 with a pause or the second char can be lost.
+        send_keys("y", pause=0.2)
+        time.sleep(0.35)
+        send_keys("1", pause=0.2)
 
         try:
-            pane.wait("exists visible", timeout=15)
+            pane.wait("exists visible", timeout=12)
             log.info("Prophix Analyzer pane opened")
             return
         except PWATimeoutError:
             log.warning(
-                "Prophix Analyzer pane did not appear within 15s "
-                "(attempt %d/2)", attempt,
+                "Prophix Analyzer pane did not appear within 12s "
+                "(attempt %d/3)", attempt,
             )
+            # Drop out of any stuck KeyTip mode before retrying.
+            try:
+                send_keys("{ESC}{ESC}", pause=0.1)
+            except Exception:
+                pass
+            time.sleep(1.0)
 
     # Dump what UIA can see so we can debug the next run.
     log.error("Could not open Prophix Analyzer pane via Alt+N+Y+1. "
