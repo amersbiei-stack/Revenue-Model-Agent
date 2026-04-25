@@ -44,6 +44,39 @@ def _bring_excel_to_front(app, log) -> None:
         log.warning("Could not bring Excel to foreground: %s", e)
 
 
+def _ensure_excel_maximized(app, log) -> None:
+    """Maximize Excel + expand the ribbon so every ribbon button is in the
+    UIA tree. Narrow windows collapse the Prophix group into an overflow
+    menu and the Analyzer button becomes invisible to descendants search.
+    """
+    XL_MAXIMIZED = -4137
+    try:
+        app.WindowState = XL_MAXIMIZED
+        log.info("Excel maximized via COM (WindowState=xlMaximized)")
+    except Exception as e:
+        log.warning("COM maximize failed: %s", e)
+    try:
+        hwnd = app.Hwnd
+        if hwnd:
+            win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
+            win32gui.SetForegroundWindow(hwnd)
+            log.info("Excel maximized via Win32")
+    except Exception as e:
+        log.warning("Win32 maximize failed: %s", e)
+    # If the ribbon was minimized to a single row, un-minimize it so ribbon
+    # buttons render at full size and appear in the UIA tree.
+    try:
+        ribbon = app.CommandBars("Ribbon")
+        h = getattr(ribbon, "Height", 0)
+        log.info("Ribbon height: %s (minimized if <80)", h)
+        if h and h < 80:
+            log.info("Ribbon appears minimized; toggling via ExecuteMso")
+            app.CommandBars.ExecuteMso("MinimizeRibbon")
+    except Exception as e:
+        log.warning("Could not check/toggle ribbon minimize state: %s", e)
+    time.sleep(0.8)
+
+
 def _analyzer_pane(main_window, timeout: float):
     """Return the pywinauto wrapper for the Prophix Analyzer pane."""
     return main_window.child_window(
@@ -78,27 +111,46 @@ def _activate_insert_tab(main_window, log) -> bool:
 
 
 def _find_prophix_analyzer_button(main_window, log):
-    """Find the leftmost 'Analyzer' ribbon button (Prophix Analyzer CV2).
+    """Find the leftmost visible 'Analyzer' ribbon button (Prophix CV2).
 
     The Prophix group on the Insert tab has Analyzer / Contributor /
-    Analyzer buttons; the CV2 one is the leftmost Analyzer. pywinauto's
-    descendants traversal is left-to-right, so the first match is the
-    right target on every Prophix build we've seen.
+    Analyzer buttons; the CV2 one is the leftmost Analyzer. We filter
+    for buttons with a real on-screen rectangle (collapsed/overflow
+    buttons have zero width) and pick the lowest X coordinate.
     """
-    for kwargs in (
-        {"title": "Analyzer", "control_type": "Button"},
-        {"title_re": r"^Analyzer$", "control_type": "Button"},
-        {"title_re": r".*Analyzer.*", "control_type": "Button"},
-    ):
+    strategies = (
+        ("exact",  {"title": "Analyzer",               "control_type": "Button"}),
+        ("regex1", {"title_re": r"^Analyzer$",         "control_type": "Button"}),
+        ("regex2", {"title_re": r".*Analyzer.*",       "control_type": "Button"}),
+    )
+    for name, kwargs in strategies:
         try:
             matches = main_window.descendants(**kwargs)
         except Exception as e:
-            log.warning("Descendant search failed for %s: %s", kwargs, e)
+            log.warning("Descendant search '%s' failed: %s", name, e)
             continue
-        if matches:
-            log.info("Found %d 'Analyzer' ribbon button(s) via %s",
-                     len(matches), kwargs)
-            return matches[0]
+        if not matches:
+            continue
+
+        visible = []
+        for m in matches:
+            try:
+                r = m.rectangle()
+                if r.width() > 0 and r.height() > 0:
+                    visible.append((r.left, m))
+            except Exception:
+                pass
+        log.info("Strategy '%s' found %d match(es), %d visible",
+                 name, len(matches), len(visible))
+        if not visible:
+            continue
+        visible.sort(key=lambda t: t[0])
+        chosen = visible[0][1]
+        try:
+            log.info("Chose Analyzer button at rect=%s", chosen.rectangle())
+        except Exception:
+            pass
+        return chosen
     return None
 
 
@@ -324,6 +376,7 @@ def run(workbook_path: Path, **_ignored) -> None:
             log.info("Activated tab: Units Bookings DV")
 
             _bring_excel_to_front(app, log)
+            _ensure_excel_maximized(app, log)
 
             ui = UIApp(backend="uia").connect(class_name="XLMAIN", timeout=15)
             main = ui.top_window()
