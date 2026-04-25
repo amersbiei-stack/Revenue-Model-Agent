@@ -101,9 +101,14 @@ STEP6_DOLLAR_CHECKS = [
     ("LATAM AS",       78, 543, 602, False),
 ]
 
-# === Step 6 units tie-out check =========================================
-# (label, summary_row, units_start, units_end)
-STEP6_UNITS_CHECK = ("Total Units", 169, 3, 152)
+# === Step 6 units tie-out checks ========================================
+# (label, summary_row, source_tab, source_start, source_end)
+# Each Summary By Region row ties to a different source tab + range.
+STEP6_UNITS_CHECKS = [
+    ("Units Total (R165)",     165, "Units Bookings DV", 3,   152),
+    ("Migration Units (R166)", 166, "Migration Units",   3,   12),
+    ("Units Total (R167)",     167, "Units Bookings DV", 228, 377),
+]
 
 # === Step 7 chart source rows (per-region CAD totals) ===================
 # (region, summary_row, plan_row, header_row, expected_header_label)

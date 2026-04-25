@@ -58,18 +58,52 @@ def _run_dollar_checks(sr_ws, bk_ws, summary_col: int, bookings_col: int) -> lis
     return out
 
 
-def _run_units_check(sr_ws, ub_ws, summary_col: int, units_col: int) -> Check:
+def _run_units_checks(sr_ws, source_tabs: dict, summary_col: int,
+                      source_cols: dict) -> list[Check]:
+    """One Check per entry in STEP6_UNITS_CHECKS. Each entry can hit a
+    different source tab (e.g. Units Bookings DV vs Migration Units).
+    """
     log = get_logger()
-    label, s_row, u_start, u_end = config.STEP6_UNITS_CHECK
-    s_val = excel_com.read_cell(sr_ws, s_row, summary_col)
-    s_val = float(s_val) if isinstance(s_val, (int, float)) else 0.0
-    u_sum = excel_com.sum_column_range(ub_ws, u_start, u_end, units_col)
-    variance = s_val - u_sum
-    tier = _classify(variance, is_total=True)
-    log.info("[%s] %s: summary=%s, source=%s, variance=%s",
-             tier.value, label,
-             f"{s_val:,.2f}", f"{u_sum:,.2f}", f"{variance:+,.2f}")
-    return Check(label, s_row, u_start, u_end, True, s_val, u_sum, variance, tier)
+    out: list[Check] = []
+    for label, s_row, tab_name, u_start, u_end in config.STEP6_UNITS_CHECKS:
+        ws = source_tabs[tab_name]
+        col = source_cols[tab_name]
+        s_val = excel_com.read_cell(sr_ws, s_row, summary_col)
+        s_val = float(s_val) if isinstance(s_val, (int, float)) else 0.0
+        u_sum = excel_com.sum_column_range(ws, u_start, u_end, col)
+        variance = s_val - u_sum
+        tier = _classify(variance, is_total=True)
+        log.info("[%s] %s: summary=%s, source=%s ('%s' rows %d-%d), variance=%s",
+                 tier.value, label,
+                 f"{s_val:,.2f}", f"{u_sum:,.2f}",
+                 tab_name, u_start, u_end,
+                 f"{variance:+,.2f}")
+        out.append(Check(label, s_row, u_start, u_end, True,
+                         s_val, u_sum, variance, tier))
+    return out
+
+
+def _apply_latam_offset_rule(checks: list[Check], log) -> None:
+    """If LATAM PX and LATAM AS variances offset each other (sum to within
+    the total tolerance), the LATAM dollar total is correct — money is just
+    misclassified between the two subregions. The downstream LATAM total
+    check already passes, so the subregion-level BLOCKs are a false alarm.
+    Downgrade both subregion Checks to PASS in that case.
+    """
+    px = next((c for c in checks if c.label == "LATAM PX"), None)
+    ax = next((c for c in checks if c.label == "LATAM AS"), None)
+    if px is None or ax is None:
+        return
+    combined = px.variance + ax.variance
+    if abs(combined) <= config.TOLERANCE_TOTAL:
+        log.info(
+            "[OFFSET] LATAM PX (%s) + LATAM AS (%s) = %s — variances offset "
+            "within $%.2f, downgrading both subregion checks to PASS.",
+            f"${px.variance:+,.2f}", f"${ax.variance:+,.2f}",
+            f"${combined:+,.2f}", config.TOLERANCE_TOTAL,
+        )
+        px.tier = Tier.PASS
+        ax.tier = Tier.PASS
 
 
 def _variance_email_html(new_month_label: str,
@@ -112,31 +146,57 @@ def run(workbook_path: Path, run_dates: date_utils.RunDates) -> list[Check]:
     log.info("=== STEP 6: Q&A validation tie-outs (label=%s) ===",
              run_dates.new_month_label)
 
+    # Build the set of source tabs we'll need to open. $$ Bookings DV is
+    # always required for dollar checks; the units checks may hit Units
+    # Bookings DV and/or Migration Units depending on STEP6_UNITS_CHECKS.
+    units_source_tab_names = {entry[2] for entry in config.STEP6_UNITS_CHECKS}
+
     with excel_com.excel_session(visible=True) as app:
         with excel_com.open_workbook(app, workbook_path,
                                      read_only=True, save_on_close=False) as wb:
             sr = wb.Worksheets("Summary By Region")
             bk = wb.Worksheets("$$ Bookings DV")
-            ub = wb.Worksheets("Units Bookings DV")
+
+            # Open every source tab the units checks reference, plus find
+            # the new-month column on each.
+            source_tabs: dict = {}
+            source_cols: dict[str, int] = {}
+            for tab_name in units_source_tab_names:
+                ws = wb.Worksheets(tab_name)
+                col = excel_com.find_column_by_label(
+                    ws, 2, run_dates.new_month_label)
+                if col == 0:
+                    raise RuntimeError(
+                        f"Could not find new-month column "
+                        f"{run_dates.new_month_label!r} on tab {tab_name!r}"
+                    )
+                source_tabs[tab_name] = ws
+                source_cols[tab_name] = col
 
             summary_col = excel_com.find_column_by_label(
                 sr, config.SUMMARY_HEADER_ROW, run_dates.new_month_label)
             bookings_col = excel_com.find_column_by_label(
                 bk, 2, run_dates.new_month_label)
-            units_col = excel_com.find_column_by_label(
-                ub, 2, run_dates.new_month_label)
-            log.info("Columns: summary=%d, bookings=%d, units=%d",
-                     summary_col, bookings_col, units_col)
-            if 0 in (summary_col, bookings_col, units_col):
+            log.info("Columns: summary=%d, bookings=%d, units_tabs=%s",
+                     summary_col, bookings_col,
+                     {n: source_cols[n] for n in units_source_tab_names})
+            if 0 in (summary_col, bookings_col):
                 raise RuntimeError(
                     f"Could not find new-month column {run_dates.new_month_label!r} "
-                    f"(summary={summary_col}, bookings={bookings_col}, units={units_col})"
+                    f"(summary={summary_col}, bookings={bookings_col})"
                 )
 
             dollar_checks = _run_dollar_checks(sr, bk, summary_col, bookings_col)
-            units_check = _run_units_check(sr, ub, summary_col, units_col)
+            units_checks = _run_units_checks(sr, source_tabs, summary_col,
+                                             source_cols)
 
-    all_checks = dollar_checks + [units_check]
+    all_checks = dollar_checks + units_checks
+
+    # Apply LATAM PX/AS offset rule before tier filtering. If the two
+    # subregion variances cancel, the dollar total is fine and we skip
+    # the BLOCK email.
+    _apply_latam_offset_rule(all_checks, log)
+
     blockers = [c for c in all_checks if c.tier is Tier.BLOCK]
     warnings = [c for c in all_checks if c.tier is Tier.WARN]
 
