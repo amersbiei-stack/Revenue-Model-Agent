@@ -53,6 +53,149 @@ def unblock_file(path: Path, log) -> None:
         log.warning("unblock-file failed (continuing anyway): %s", e)
 
 
+def ensure_trusted_location(folder_path: Path, log) -> bool:
+    """Register a folder under HKCU\\Software\\Microsoft\\Office\\<ver>\\
+    Excel\\Security\\Trusted Locations so macros run without the per-file
+    security gate. Idempotent: silently skips if the folder is already
+    listed. Returns True if a Trusted Location entry exists for the
+    folder when this function returns.
+    """
+    import os
+    import winreg
+
+    folder = os.path.normpath(str(folder_path))
+    if not folder.endswith("\\"):
+        folder_with_sep = folder + "\\"
+    else:
+        folder_with_sep = folder
+    folder_norm = os.path.normcase(folder.rstrip("\\"))
+
+    success_any_ver = False
+    for ver in ("16.0", "15.0", "14.0"):
+        base = rf"Software\Microsoft\Office\{ver}\Excel\Security\Trusted Locations"
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, base, 0,
+                winreg.KEY_READ | winreg.KEY_WRITE,
+            ) as parent:
+                # Already listed?
+                already = False
+                i = 0
+                while True:
+                    try:
+                        sub_name = winreg.EnumKey(parent, i)
+                    except OSError:
+                        break
+                    try:
+                        with winreg.OpenKey(parent, sub_name) as sk:
+                            try:
+                                p, _ = winreg.QueryValueEx(sk, "Path")
+                            except FileNotFoundError:
+                                p = ""
+                        if (p and
+                                os.path.normcase(str(p).rstrip("\\"))
+                                == folder_norm):
+                            already = True
+                            break
+                    except Exception:
+                        pass
+                    i += 1
+
+                if already:
+                    log.info("Trusted Location already present for Office %s: %s",
+                             ver, folder)
+                    success_any_ver = True
+                    continue
+
+                # Create our own entry. Use a stable name so we don't
+                # multiply-register on subsequent runs.
+                with winreg.CreateKey(parent, "RevenueModelAgent") as sk:
+                    winreg.SetValueEx(sk, "Path", 0, winreg.REG_SZ,
+                                      folder_with_sep)
+                    winreg.SetValueEx(sk, "AllowSubFolders", 0,
+                                      winreg.REG_DWORD, 1)
+                    winreg.SetValueEx(sk, "Description", 0, winreg.REG_SZ,
+                                      "Revenue Model Agent (auto-added)")
+                    winreg.SetValueEx(sk, "Date", 0, winreg.REG_SZ,
+                                      "Auto-added by Revenue Model Agent")
+                log.info("Registered Trusted Location for Office %s: %s",
+                         ver, folder)
+                success_any_ver = True
+        except FileNotFoundError:
+            # That Office version isn't installed; try the next.
+            continue
+        except PermissionError as e:
+            log.warning(
+                "Cannot write Trusted Locations for Office %s "
+                "(permission denied): %s", ver, e,
+            )
+        except Exception as e:
+            log.warning("Trusted Locations registration failed for Office %s: %s",
+                        ver, e)
+
+    if not success_any_ver:
+        log.warning(
+            "Could not register a Trusted Location in any Office version. "
+            "If macros are blocked, add the folder manually: Excel → File → "
+            "Options → Trust Center → Trust Center Settings → Trusted Locations."
+        )
+    return success_any_ver
+
+
+def clear_disabled_item(workbook_path: Path, log) -> None:
+    """Remove the workbook from Excel's per-file 'Disabled Items' cache.
+
+    After a crash or failed automation Excel sometimes adds a file to
+    HKCU\\Software\\Microsoft\\Office\\<ver>\\Excel\\Resiliency\\
+    DisabledItems, which disables macros for THAT FILE regardless of
+    Trust Center / AutomationSecurity. Best-effort cleanup.
+    """
+    import winreg
+
+    target = str(workbook_path).lower()
+    cleared = 0
+    for ver in ("16.0", "15.0", "14.0"):
+        base = (rf"Software\Microsoft\Office\{ver}\Excel\Resiliency"
+                r"\DisabledItems")
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER, base, 0,
+                winreg.KEY_READ | winreg.KEY_WRITE,
+            ) as k:
+                values_to_delete = []
+                i = 0
+                while True:
+                    try:
+                        name, data, _kind = winreg.EnumValue(k, i)
+                    except OSError:
+                        break
+                    try:
+                        as_text = bytes(data).decode(
+                            "utf-16-le", errors="ignore",
+                        ).lower() if isinstance(data, (bytes, bytearray)) else str(data).lower()
+                    except Exception:
+                        as_text = ""
+                    if target in as_text or workbook_path.name.lower() in as_text:
+                        values_to_delete.append(name)
+                    i += 1
+                for name in values_to_delete:
+                    try:
+                        winreg.DeleteValue(k, name)
+                        cleared += 1
+                    except Exception as e:
+                        log.warning("Could not delete DisabledItems entry %s: %s",
+                                    name, e)
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            log.warning("DisabledItems lookup failed for Office %s: %s", ver, e)
+    if cleared:
+        log.info("Cleared %d DisabledItems entry(ies) for this workbook",
+                 cleared)
+    else:
+        log.debug("No DisabledItems entries found for this workbook")
+
+
 @contextmanager
 def excel_session(visible: bool = True) -> Iterator:
     """Context-managed Excel.Application. Auto-enables macros, suppresses alerts."""

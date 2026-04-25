@@ -44,6 +44,15 @@ def run(workbook_path: Path,
     # acquire MOTW after sync round-trips.
     excel_com.unblock_file(workbook_path, log)
 
+    # Make sure the workbook's folder is a Trusted Location so macros run
+    # without the per-file security gate. Idempotent.
+    excel_com.ensure_trusted_location(workbook_path.parent, log)
+
+    # If a previous failed run added this file to Excel's per-file
+    # Disabled Items cache, that disables macros regardless of Trust
+    # Center / AutomationSecurity settings. Clear it.
+    excel_com.clear_disabled_item(workbook_path, log)
+
     with excel_com.excel_session(visible=True) as app:
         with excel_com.open_workbook(app, workbook_path,
                                      read_only=False, save_on_close=True):
