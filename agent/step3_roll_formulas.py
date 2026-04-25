@@ -38,6 +38,11 @@ def run(workbook_path: Path,
     file_date = date_utils.parse_filename(workbook_path)
     date_math_guard(file_date, expected_close_year, expected_close_month)
 
+    # If a previous Step 4 left Excel running (DETACHED_PROCESS), the
+    # workbook is still locked. Close it gracefully (or force-kill EXCEL.EXE
+    # if needed) before doing anything else.
+    excel_com.close_orphan_excel(workbook_path, log)
+
     # Strip Mark of the Web before opening. Office's 'Block macros from
     # the Internet' policy disables VBA in any .xlsm carrying MOTW — even
     # when AutomationSecurity=Low — and OneDrive-synced files sometimes

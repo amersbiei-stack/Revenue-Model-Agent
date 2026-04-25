@@ -79,6 +79,10 @@ def _launch_excel_natively(workbook_path: Path, log):
             "registry key and common install dirs."
         )
 
+    # Make sure no orphan Excel is still holding this workbook from a
+    # previous failed Step 4 (DETACHED_PROCESS lets Excel survive crashes).
+    excel_com.close_orphan_excel(workbook_path, log)
+
     log.info("Launching Excel natively: %s  %s", excel_exe, workbook_path)
     # DETACHED_PROCESS so Excel keeps running even if the agent exits
     # unexpectedly mid-step (belt and suspenders — we still Save/Quit

@@ -1,5 +1,6 @@
 """Excel COM helpers. Open workbook, run macro, read ranges with label-check guards."""
 import subprocess
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -140,6 +141,68 @@ def ensure_trusted_location(folder_path: Path, log) -> bool:
             "Options → Trust Center → Trust Center Settings → Trusted Locations."
         )
     return success_any_ver
+
+
+def close_orphan_excel(workbook_path: Path, log) -> None:
+    """If a previous run left Excel running with this workbook open,
+    close it. Tries graceful COM close first, falls back to taskkill.
+
+    Necessary because Step 4 launches EXCEL.EXE with DETACHED_PROCESS so
+    the subprocess survives if the agent crashes mid-step. The next run
+    then can't open the workbook because Excel still has it locked.
+    """
+    name_lower = workbook_path.name.lower()
+
+    # Pass 1: graceful close via COM. Iterate every running Excel
+    # instance, find any workbook matching ours, close it; if Excel ends
+    # up with zero workbooks open, quit it.
+    try:
+        # GetObject() with no arg returns the active Excel; we instead
+        # walk every running instance via the ROT-style enumeration
+        # exposed by win32com. Easiest portable form: GetObject of our
+        # specific path returns the workbook from whichever Excel has it.
+        try:
+            wb = win32.GetObject(str(workbook_path))
+            owner_app = wb.Application
+            log.info("Closing orphan Excel that has %s open", name_lower)
+            try:
+                wb.Close(SaveChanges=False)
+            except Exception as e:
+                log.warning("Orphan workbook.Close failed: %s", e)
+            try:
+                if owner_app.Workbooks.Count == 0:
+                    owner_app.Quit()
+                    log.info("Orphan Excel quit (no workbooks remaining)")
+            except Exception as e:
+                log.warning("Orphan Excel.Quit failed: %s", e)
+        except Exception:
+            # GetObject raises if no Excel has it open — that's fine.
+            pass
+    except Exception as e:
+        log.debug("Graceful orphan close failed: %s", e)
+
+    # Pass 2: if the lock-file is still there, force-kill EXCEL.EXE.
+    # OneDrive .xlsm files have a sibling lock file '~$<name>'.
+    lockfile = workbook_path.parent / f"~${workbook_path.name}"
+    if lockfile.exists():
+        log.warning("Lock file still present (%s) — force-killing EXCEL.EXE",
+                    lockfile.name)
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "EXCEL.EXE"],
+                capture_output=True, text=True, timeout=15,
+            )
+            time.sleep(2.0)
+        except Exception as e:
+            log.warning("taskkill EXCEL.EXE failed: %s", e)
+        # Try to remove the lock file too — Office sometimes leaves it
+        # behind even after Excel exits.
+        try:
+            if lockfile.exists():
+                lockfile.unlink()
+                log.info("Removed stale lock file %s", lockfile.name)
+        except Exception as e:
+            log.warning("Could not remove lock file: %s", e)
 
 
 def clear_disabled_item(workbook_path: Path, log) -> None:
