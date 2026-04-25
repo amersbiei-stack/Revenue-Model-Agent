@@ -28,9 +28,10 @@ Archive/
 
 # ============================================================
 # Machine-specific configuration
-# config.example.json is the template.
-# config.json is tracked per user's request (private repo).
-# If this repo ever becomes public, re-add "config.json" below.
+# config.example.json is the template (tracked).
+# config.json holds per-user paths/email and MUST stay local —
+# tracking it caused new ZIP downloads to overwrite users' edits.
+config.json
 # ============================================================
 
 # ============================================================
