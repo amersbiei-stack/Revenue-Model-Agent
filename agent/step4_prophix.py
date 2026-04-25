@@ -28,13 +28,26 @@ from agent.logging_setup import get_logger
 
 
 def _bring_excel_to_front(app, log) -> None:
-    """Restore + foreground the Excel window. SendKeys won't land otherwise."""
-    try:
-        hwnd = app.Hwnd
-    except Exception as e:
-        log.warning("Could not read Application.Hwnd: %s", e)
-        return
+    """Restore + foreground the Excel window. SendKeys won't land otherwise.
+
+    app.Hwnd can raise 'application is busy' when Excel is mid-operation
+    (common right after opening a task pane). Retry with backoff instead
+    of bailing on the first transient failure.
+    """
+    hwnd = None
+    for i in range(5):
+        try:
+            hwnd = app.Hwnd
+            break
+        except Exception as e:
+            msg = str(e).lower()
+            if "busy" in msg or "message filter" in msg:
+                time.sleep(0.8 * (i + 1))
+                continue
+            log.warning("Could not read Application.Hwnd: %s", e)
+            return
     if not hwnd:
+        log.warning("Application.Hwnd unavailable after retries; skipping foreground")
         return
     try:
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
@@ -80,6 +93,91 @@ def _ensure_excel_maximized(app, log) -> None:
 # (legacy _analyzer_pane removed — pywinauto 0.6.9 on Python 3.14 rejects
 # title_re. See _wait_for_pane / _find_pane_descendant below for the
 # title_re-free replacements.)
+
+
+def _com_retry(fn, log, retries: int = 5, initial_delay: float = 1.0):
+    """Call a COM function, retrying if Excel returns 'application is busy'.
+
+    Excel raises pywintypes.com_error -2147417846 (message filter) when the
+    COM server is mid-operation — common right after triggering a task-pane
+    open or a refresh.
+    """
+    delay = initial_delay
+    last = None
+    for i in range(retries):
+        try:
+            return fn()
+        except Exception as e:
+            last = e
+            msg = str(e).lower()
+            if ("message filter" in msg or
+                    "busy" in msg or
+                    "0x8001010a" in msg or
+                    "rpc_e_serverfaulty" in msg):
+                log.debug("COM retry %d/%d: busy; sleeping %.1fs", i + 1, retries, delay)
+                time.sleep(delay)
+                delay *= 1.5
+                continue
+            raise
+    raise RuntimeError(f"COM call remained busy after {retries} retries: {last}")
+
+
+def _wait_for_addins_to_load(app, log, wait_seconds: int = 15) -> None:
+    """Pause for Excel-via-COM add-ins to finish loading, then log what's
+    actually available. Force-connect any Prophix entry we spot."""
+    log.info("Waiting %ds for Excel add-ins to initialize after workbook open",
+             wait_seconds)
+    time.sleep(wait_seconds)
+
+    # COM add-ins
+    try:
+        com_addins = app.COMAddIns
+        count = com_addins.Count
+    except Exception as e:
+        log.warning("Could not read COMAddIns: %s", e)
+        count = 0
+    log.info("COM add-ins currently registered: %d", count)
+    for i in range(1, count + 1):
+        try:
+            a = com_addins.Item(i)
+            progid = str(getattr(a, "ProgID", "") or "")
+            desc = str(getattr(a, "Description", "") or "")
+            connected = bool(getattr(a, "Connect", False))
+            log.info("  COM[%d] %s | %s | Connect=%s",
+                     i, progid, desc, connected)
+            if ("prophix" in progid.lower() or "prophix" in desc.lower()) and not connected:
+                log.info("  -> connecting %s", progid)
+                try:
+                    a.Connect = True
+                    time.sleep(1.5)
+                except Exception as e:
+                    log.warning("  -> could not connect %s: %s", progid, e)
+        except Exception as e:
+            log.warning("  COM[%d] inspection failed: %s", i, e)
+
+    # Native Excel add-ins (XLAM/XLL)
+    try:
+        xl_addins = app.AddIns
+        xl_count = xl_addins.Count
+    except Exception as e:
+        log.warning("Could not read Application.AddIns: %s", e)
+        xl_count = 0
+    log.info("Excel (XLL/XLAM) add-ins registered: %d", xl_count)
+    for i in range(1, xl_count + 1):
+        try:
+            a = xl_addins.Item(i)
+            name = str(getattr(a, "Name", "") or "")
+            installed = bool(getattr(a, "Installed", False))
+            log.info("  XL[%d] %s | Installed=%s", i, name, installed)
+            if "prophix" in name.lower() and not installed:
+                log.info("  -> installing %s", name)
+                try:
+                    a.Installed = True
+                    time.sleep(1.5)
+                except Exception as e:
+                    log.warning("  -> could not install %s: %s", name, e)
+        except Exception as e:
+            log.warning("  XL[%d] inspection failed: %s", i, e)
 
 
 def _activate_insert_tab(main_window, log) -> bool:
@@ -292,32 +390,42 @@ def _click_via_uia(main_window, log) -> bool:
 
 
 def _click_via_keyboard(main_window, log) -> bool:
-    """Fallback path: Alt+N+Y+1 via OS-level keystrokes."""
+    """Fallback path: Alt+N+Y+1 via OS-level keystrokes.
+
+    Each attempt first clicks the Insert ribbon tab — this nudges Prophix
+    to lazy-load its ribbon controls when Excel was launched via COM
+    (add-ins don't always auto-initialize the same way they do on a
+    double-click launch).
+    """
     from pywinauto.keyboard import send_keys
 
-    for attempt in range(1, 3):
+    for attempt in range(1, 5):
+        # Clicking Insert is cheap and often the nudge Prophix needs.
+        _activate_insert_tab(main_window, log)
+
         try:
             main_window.set_focus()
         except Exception as e:
             log.warning("set_focus failed (kbd attempt %d): %s", attempt, e)
         time.sleep(0.8)
 
-        log.info("Sending Alt+N, then Y, then 1 (kbd attempt %d/2)", attempt)
+        log.info("Sending Alt+N, then Y, then 1 (kbd attempt %d/4)", attempt)
         send_keys("{VK_MENU down}n{VK_MENU up}", pause=0.15)
         time.sleep(1.5)
         send_keys("y", pause=0.2)
         time.sleep(0.35)
         send_keys("1", pause=0.2)
 
-        if _wait_for_pane(main_window, log, timeout=12):
-            log.info("Prophix Analyzer pane opened (keyboard)")
+        if _wait_for_pane(main_window, log, timeout=15):
+            log.info("Prophix Analyzer pane opened (keyboard, attempt %d/4)",
+                     attempt)
             return True
-        log.warning("Pane didn't appear after keystrokes (attempt %d/2)", attempt)
+        log.warning("Pane didn't appear after keystrokes (attempt %d/4)", attempt)
         try:
             send_keys("{ESC}{ESC}", pause=0.1)
         except Exception:
             pass
-        time.sleep(1.0)
+        time.sleep(2.0)
     return False
 
 
@@ -491,11 +599,21 @@ def run(workbook_path: Path, **_ignored) -> None:
             _bring_excel_to_front(app, log)
             _ensure_excel_maximized(app, log)
 
+            # Excel launched via COM doesn't auto-load every add-in the
+            # same way a double-click launch does. Prophix Analyzer CV2
+            # in particular can be absent from COMAddIns until we give
+            # it time to initialize (and/or click the Insert tab).
+            _wait_for_addins_to_load(app, log, wait_seconds=15)
+
             ui = UIApp(backend="uia").connect(class_name="XLMAIN", timeout=15)
             main = ui.top_window()
 
             _open_analyzer_pane(app, main, log)
-            _bring_excel_to_front(app, log)
+
+            # Give the Prophix pane a few seconds to populate its UIA
+            # subtree (refresh button etc.) before we try to click it.
+            time.sleep(4.0)
+
             _click_refresh_all_sheets(main, log)
 
             log.info("Sleeping %d seconds for Prophix refresh to complete",
