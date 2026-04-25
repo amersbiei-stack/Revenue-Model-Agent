@@ -3,11 +3,12 @@
 Drives the Prophix Analyzer CV2 pane end-to-end, no human interaction:
 
   1. Open the workbook and activate `Units Bookings DV`.
-  2. Force Excel to the foreground (SendKeys requires it).
-  3. Send Alt+N+Y+1 via Excel's Application.SendKeys to open the pane.
-  4. Use UI Automation (pywinauto) to find the pane's refresh split-button,
-     expand its dropdown, and click "All Sheets".
-  5. Sleep PROPHIX_WAIT_SECONDS (default 600) for the refresh to complete.
+  2. Click the Insert > Prophix > Analyzer ribbon button via UI Automation
+     (falls back to Alt+N+Y+1 keystrokes if the UIA click can't find the
+     button — some Prophix builds expose the control under different names).
+  3. Use UI Automation to find the pane's refresh split-button, expand its
+     dropdown, and click "All Sheets".
+  4. Sleep PROPHIX_WAIT_SECONDS (default 600) for the refresh to complete.
 
 Step 5 is the safety net: if the refresh didn't actually run, its sum
 checks on all 5 DV tabs will fail and a Step 5 failure email will draft.
@@ -52,74 +53,187 @@ def _analyzer_pane(main_window, timeout: float):
     ).wait("exists visible", timeout=timeout)
 
 
-def _open_analyzer_pane(app, main_window, log) -> None:
-    """If the pane isn't already open, send Alt+N+Y+1 and wait for it."""
+def _activate_insert_tab(main_window, log) -> bool:
+    """Select the Insert ribbon tab via UIA so its buttons are reachable."""
+    for kwargs in (
+        {"title": "Insert", "control_type": "TabItem"},
+        {"title_re": "Insert.*", "control_type": "TabItem"},
+        {"title": "Insert", "control_type": "Button"},
+    ):
+        try:
+            tab = main_window.child_window(**kwargs)
+            if not tab.exists(timeout=2):
+                continue
+            try:
+                tab.select()
+            except Exception:
+                tab.click_input()
+            time.sleep(0.6)
+            log.info("Insert tab activated via UIA (%s)", kwargs)
+            return True
+        except Exception:
+            continue
+    log.warning("Could not activate Insert tab via UIA")
+    return False
+
+
+def _find_prophix_analyzer_button(main_window, log):
+    """Find the leftmost 'Analyzer' ribbon button (Prophix Analyzer CV2).
+
+    The Prophix group on the Insert tab has Analyzer / Contributor /
+    Analyzer buttons; the CV2 one is the leftmost Analyzer. pywinauto's
+    descendants traversal is left-to-right, so the first match is the
+    right target on every Prophix build we've seen.
+    """
+    for kwargs in (
+        {"title": "Analyzer", "control_type": "Button"},
+        {"title_re": r"^Analyzer$", "control_type": "Button"},
+        {"title_re": r".*Analyzer.*", "control_type": "Button"},
+    ):
+        try:
+            matches = main_window.descendants(**kwargs)
+        except Exception as e:
+            log.warning("Descendant search failed for %s: %s", kwargs, e)
+            continue
+        if matches:
+            log.info("Found %d 'Analyzer' ribbon button(s) via %s",
+                     len(matches), kwargs)
+            return matches[0]
+    return None
+
+
+def _click_via_uia(main_window, log) -> bool:
+    """Primary path: click the Analyzer ribbon button via UIA Invoke.
+
+    Returns True if the Prophix Analyzer pane appears within 12s.
+    """
+    from pywinauto.timings import TimeoutError as PWATimeoutError
+
+    pane = main_window.child_window(
+        title_re="Prophix Analyzer.*", control_type="Pane",
+    )
+
+    for attempt in range(1, 3):
+        try:
+            main_window.set_focus()
+        except Exception as e:
+            log.warning("set_focus failed (UIA attempt %d): %s", attempt, e)
+        time.sleep(0.4)
+
+        _activate_insert_tab(main_window, log)
+
+        btn = _find_prophix_analyzer_button(main_window, log)
+        if btn is None:
+            log.warning("Analyzer ribbon button not found (attempt %d/2)", attempt)
+            continue
+
+        log.info("Clicking Analyzer ribbon button via UIA (attempt %d/2)", attempt)
+        clicked = False
+        try:
+            btn.invoke()  # UIA Invoke pattern — a real click without mouse
+            clicked = True
+        except Exception as e:
+            log.warning("btn.invoke() failed: %s; trying click_input", e)
+            try:
+                btn.click_input()
+                clicked = True
+            except Exception as e2:
+                log.warning("btn.click_input() failed: %s", e2)
+
+        if not clicked:
+            continue
+
+        try:
+            pane.wait("exists visible", timeout=12)
+            log.info("Prophix Analyzer pane opened (UIA click)")
+            return True
+        except PWATimeoutError:
+            log.warning("Pane didn't appear after UIA click (attempt %d/2)",
+                        attempt)
+
+    return False
+
+
+def _click_via_keyboard(main_window, log) -> bool:
+    """Fallback path: Alt+N+Y+1 via OS-level keystrokes."""
     from pywinauto.keyboard import send_keys
     from pywinauto.timings import TimeoutError as PWATimeoutError
 
     pane = main_window.child_window(
-        title_re="Prophix Analyzer.*",
-        control_type="Pane",
+        title_re="Prophix Analyzer.*", control_type="Pane",
     )
-    if pane.exists(timeout=1):
-        log.info("Prophix Analyzer pane already open")
-        return
 
-    # Three-attempt retry. pywinauto's send_keys drives OS-level keyboard
-    # input (unlike Excel.Application.SendKeys, which quietly fails for
-    # ribbon KeyTip navigation). Focus must belong to Excel for ribbon
-    # shortcuts to register.
-    for attempt in range(1, 4):
+    for attempt in range(1, 3):
         try:
             main_window.set_focus()
         except Exception as e:
-            log.warning("Excel set_focus failed (attempt %d): %s", attempt, e)
+            log.warning("set_focus failed (kbd attempt %d): %s", attempt, e)
         time.sleep(0.8)
 
-        log.info("Sending Alt+N, then Y, then 1 (attempt %d/3)", attempt)
-        # Explicit VK_MENU down/up makes the Alt boundary unambiguous —
-        # the %n shorthand sometimes releases Alt before 'n' registers.
+        log.info("Sending Alt+N, then Y, then 1 (kbd attempt %d/2)", attempt)
         send_keys("{VK_MENU down}n{VK_MENU up}", pause=0.15)
-        time.sleep(1.5)  # let the Insert tab render its command KeyTips
-        # Two-char KeyTips are matched by Excel's state machine after each
-        # key; split Y and 1 with a pause or the second char can be lost.
+        time.sleep(1.5)
         send_keys("y", pause=0.2)
         time.sleep(0.35)
         send_keys("1", pause=0.2)
 
         try:
             pane.wait("exists visible", timeout=12)
-            log.info("Prophix Analyzer pane opened")
-            return
+            log.info("Prophix Analyzer pane opened (keyboard)")
+            return True
         except PWATimeoutError:
-            log.warning(
-                "Prophix Analyzer pane did not appear within 12s "
-                "(attempt %d/3)", attempt,
-            )
-            # Drop out of any stuck KeyTip mode before retrying.
+            log.warning("Pane didn't appear after keystrokes (attempt %d/2)",
+                        attempt)
             try:
                 send_keys("{ESC}{ESC}", pause=0.1)
             except Exception:
                 pass
             time.sleep(1.0)
+    return False
 
-    # Dump what UIA can see so we can debug the next run.
-    log.error("Could not open Prophix Analyzer pane via Alt+N+Y+1. "
-              "Dumping top-level children of the Excel window:")
+
+def _open_analyzer_pane(app, main_window, log) -> None:
+    """Open the Prophix Analyzer pane. UIA click first, keyboard fallback."""
+    pane = main_window.child_window(
+        title_re="Prophix Analyzer.*", control_type="Pane",
+    )
+    if pane.exists(timeout=1):
+        log.info("Prophix Analyzer pane already open")
+        return
+
+    if _click_via_uia(main_window, log):
+        return
+
+    log.info("UIA click could not open the pane; falling back to Alt+N+Y+1")
+    if _click_via_keyboard(main_window, log):
+        return
+
+    # Both paths failed — dump diagnostics so the next run can be tuned.
+    log.error("Could not open Prophix Analyzer pane by UIA click or keyboard.")
+    log.error("Top-level children of the Excel window:")
     try:
         for child in main_window.children()[:40]:
             try:
                 log.error("  title=%r class=%s",
-                          child.window_text(),
-                          child.friendly_class_name())
+                          child.window_text(), child.friendly_class_name())
             except Exception:
                 pass
     except Exception as e:
         log.error("  (could not enumerate children: %s)", e)
+    log.error("Ribbon buttons visible (first 40):")
+    try:
+        buttons = main_window.descendants(control_type="Button")
+        for b in buttons[:40]:
+            try:
+                log.error("  button title=%r", b.window_text())
+            except Exception:
+                pass
+    except Exception as e:
+        log.error("  (could not enumerate buttons: %s)", e)
     raise RuntimeError(
-        "Step 4: Prophix Analyzer pane never opened after Alt+N+Y+1. "
-        "Confirm the shortcut still applies and that Excel keeps focus "
-        "during Step 4 (do not click away while the agent runs)."
+        "Step 4: Prophix Analyzer pane never opened (tried UIA click on the "
+        "Insert > Analyzer ribbon button, then Alt+N+Y+1 keystrokes). Check "
+        "the log for visible UI elements."
     )
 
 
