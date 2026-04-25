@@ -2,13 +2,16 @@
 
 Drives the Prophix Analyzer CV2 pane end-to-end, no human interaction:
 
-  1. Open the workbook and activate `Units Bookings DV`.
-  2. Click the Insert > Prophix > Analyzer ribbon button via UI Automation
-     (falls back to Alt+N+Y+1 keystrokes if the UIA click can't find the
-     button — some Prophix builds expose the control under different names).
-  3. Use UI Automation to find the pane's refresh split-button, expand its
-     dropdown, and click "All Sheets".
-  4. Sleep PROPHIX_WAIT_SECONDS (default 600) for the refresh to complete.
+  1. Launch EXCEL.EXE as a subprocess (not via COM Dispatch) so Prophix
+     Analyzer CV2 loads — Dispatch starts Excel in automation/embedding
+     mode, which skips many COM add-ins including Prophix.
+  2. Attach to the workbook via COM and activate `Units Bookings DV`.
+  3. Click the Insert > Prophix > Analyzer ribbon button via UI Automation
+     (tries every visible 'Analyzer' button — the CV2 one's position
+     in the group varies by install). Falls back to Alt+N+Y+1 if needed.
+  4. Use UI Automation to find the pane's refresh split-button, expand
+     its dropdown, and click "All Sheets".
+  5. Sleep PROPHIX_WAIT_SECONDS (default 600) for the refresh to complete.
 
 Step 5 is the safety net: if the refresh didn't actually run, its sum
 checks on all 5 DV tabs will fail and a Step 5 failure email will draft.
@@ -17,14 +20,136 @@ Assumptions (documented in SETUP.md):
   - Prophix Analyzer CV2 is installed and signed in on this machine.
   - Excel Trust Center includes the project folder (no macro prompt).
 """
+import os
+import subprocess
 import time
 from pathlib import Path
 
+import win32com.client
 import win32con
 import win32gui
 
 from agent import config, excel_com
 from agent.logging_setup import get_logger
+
+
+def _find_excel_exe(log) -> str | None:
+    """Locate EXCEL.EXE via App Paths registry key, then common install dirs."""
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\excel.exe",
+        ) as k:
+            val, _ = winreg.QueryValueEx(k, None)
+            if val and os.path.exists(val):
+                log.info("Found EXCEL.EXE via registry: %s", val)
+                return val
+    except Exception as e:
+        log.debug("registry lookup for excel.exe failed: %s", e)
+
+    bases = [
+        r"C:\Program Files\Microsoft Office",
+        r"C:\Program Files (x86)\Microsoft Office",
+    ]
+    for base in bases:
+        if not os.path.isdir(base):
+            continue
+        for root, _dirs, files in os.walk(base):
+            if "EXCEL.EXE" in files:
+                p = os.path.join(root, "EXCEL.EXE")
+                log.info("Found EXCEL.EXE by filesystem walk: %s", p)
+                return p
+    return None
+
+
+def _launch_excel_natively(workbook_path: Path, log):
+    """Start EXCEL.EXE in a subprocess, wait for the workbook to become
+    COM-accessible, and return (app, wb).
+
+    This replaces win32.Dispatch("Excel.Application") for Step 4 because
+    Dispatch puts Excel in embedding/automation mode, which skips loading
+    Prophix Analyzer CV2 (and other COM add-ins). A subprocess launch
+    behaves exactly like double-clicking the file.
+    """
+    excel_exe = _find_excel_exe(log)
+    if not excel_exe:
+        raise RuntimeError(
+            "Step 4: could not locate EXCEL.EXE. Tried the App Paths "
+            "registry key and common install dirs."
+        )
+
+    log.info("Launching Excel natively: %s  %s", excel_exe, workbook_path)
+    # DETACHED_PROCESS so Excel keeps running even if the agent exits
+    # unexpectedly mid-step (belt and suspenders — we still Save/Quit
+    # in the finally block).
+    creationflags = 0x00000008  # DETACHED_PROCESS
+    subprocess.Popen(
+        [excel_exe, str(workbook_path)],
+        creationflags=creationflags,
+        close_fds=True,
+    )
+
+    target_path_lower = str(workbook_path).lower()
+    deadline = time.time() + 90
+    wb = None
+    app = None
+    log.info("Waiting for workbook to register in the running Excel instance")
+    while time.time() < deadline:
+        try:
+            # GetObject on a file path returns the Workbook COM object from
+            # whichever Excel has it open.
+            wb_candidate = win32com.client.GetObject(str(workbook_path))
+            app = wb_candidate.Application
+            # Scan Workbooks collection on that app to get the workbook
+            # wrapper we'll use for the rest of the step.
+            for i in range(1, app.Workbooks.Count + 1):
+                try:
+                    w = app.Workbooks.Item(i)
+                    if str(w.FullName).lower() == target_path_lower:
+                        wb = w
+                        break
+                except Exception:
+                    continue
+            if wb is not None:
+                log.info("Excel attached and workbook open")
+                break
+        except Exception:
+            pass
+        time.sleep(1.5)
+
+    if wb is None or app is None:
+        raise RuntimeError(
+            "Step 4: Excel subprocess started but the workbook did not "
+            "become COM-accessible within 90s."
+        )
+    # Extra settle time so COM add-ins (Prophix) finish registering.
+    time.sleep(5.0)
+    return app, wb
+
+
+def _shutdown_excel(app, wb, log) -> None:
+    """Save the workbook, close it, and quit Excel. Best-effort."""
+    try:
+        if wb is not None:
+            wb.Save()
+            log.info("Workbook saved")
+    except Exception as e:
+        log.warning("Save failed: %s", e)
+    try:
+        if wb is not None:
+            wb.Close(SaveChanges=False)
+    except Exception as e:
+        log.warning("Workbook close failed: %s", e)
+    try:
+        if app is not None:
+            app.Quit()
+            log.info("Excel quit")
+    except Exception as e:
+        log.warning("Excel quit failed: %s", e)
+
+
+
 
 
 def _bring_excel_to_front(app, log) -> None:
@@ -212,21 +337,18 @@ def _activate_insert_tab(main_window, log) -> bool:
     return False
 
 
-def _find_prophix_analyzer_button(main_window, log):
-    """Enumerate all descendants and filter for a visible 'Analyzer' button.
+def _find_prophix_analyzer_buttons(main_window, log):
+    """Return every visible 'Analyzer' descendant, sorted left→right.
 
-    Avoids pywinauto's title_re kwarg (unsupported on 0.6.9). We enumerate
-    all descendants, keep anything whose display text contains 'Analyzer'
-    and has a non-zero rectangle, then pick the leftmost — the Prophix
-    CV2 button (which sits to the left of Contributor and the duplicate
-    second Analyzer in the ribbon Prophix group).
+    The Prophix group has Contributor + 2x Analyzer. Which Analyzer is
+    the CV2 one varies by install (leftmost on one, rightmost on another).
+    Caller should try each until the Prophix Analyzer pane actually opens.
     """
-    # Pull every descendant once; cheaper than multiple searches.
     try:
         all_descendants = main_window.descendants()
     except Exception as e:
         log.warning("Could not enumerate descendants: %s", e)
-        return None
+        return []
 
     candidates = []
     for d in all_descendants:
@@ -248,14 +370,11 @@ def _find_prophix_analyzer_button(main_window, log):
             ctype = "?"
         candidates.append((rect.left, d, title, ctype))
 
-    log.info("Analyzer candidates (visible, by X):")
     candidates.sort(key=lambda t: t[0])
-    for left, d, title, ctype in candidates[:10]:
+    log.info("Analyzer candidates (%d, visible, by X):", len(candidates))
+    for left, _d, title, ctype in candidates[:10]:
         log.info("  left=%d title=%r ctype=%s", left, title, ctype)
-
-    if not candidates:
-        return None
-    return candidates[0][1]
+    return [c[1] for c in candidates]
 
 
 def _try_open_via_com_addin(app, log) -> bool:
@@ -350,22 +469,28 @@ def _wait_for_pane(main_window, log, timeout: float = 12.0) -> bool:
 
 
 def _click_via_uia(main_window, log) -> bool:
-    """Click the Analyzer ribbon button via UIA Invoke."""
-    for attempt in range(1, 3):
-        try:
-            main_window.set_focus()
-        except Exception as e:
-            log.warning("set_focus failed (UIA attempt %d): %s", attempt, e)
-        time.sleep(0.4)
+    """Click each visible 'Analyzer' ribbon button via UIA Invoke until the
+    Prophix Analyzer pane opens.
 
-        _activate_insert_tab(main_window, log)
+    The Prophix group has Contributor + 2x Analyzer buttons. We don't know
+    a priori which Analyzer is CV2 vs the other build, so we try each and
+    the first one that opens the pane wins.
+    """
+    try:
+        main_window.set_focus()
+    except Exception as e:
+        log.warning("set_focus failed: %s", e)
+    time.sleep(0.4)
 
-        btn = _find_prophix_analyzer_button(main_window, log)
-        if btn is None:
-            log.warning("Analyzer ribbon button not found (attempt %d/2)", attempt)
-            continue
+    _activate_insert_tab(main_window, log)
 
-        log.info("Clicking Analyzer ribbon button via UIA (attempt %d/2)", attempt)
+    buttons = _find_prophix_analyzer_buttons(main_window, log)
+    if not buttons:
+        log.warning("No visible 'Analyzer' ribbon buttons found")
+        return False
+
+    for idx, btn in enumerate(buttons, start=1):
+        log.info("Clicking Analyzer candidate %d/%d via UIA", idx, len(buttons))
         clicked = False
         try:
             btn.invoke()
@@ -381,10 +506,11 @@ def _click_via_uia(main_window, log) -> bool:
         if not clicked:
             continue
 
-        if _wait_for_pane(main_window, log, timeout=12):
-            log.info("Prophix Analyzer pane opened (UIA click)")
+        if _wait_for_pane(main_window, log, timeout=10):
+            log.info("Prophix Analyzer pane opened (UIA click, candidate %d)",
+                     idx)
             return True
-        log.warning("Pane didn't appear after UIA click (attempt %d/2)", attempt)
+        log.info("Candidate %d didn't open the pane; trying next", idx)
 
     return False
 
@@ -589,35 +715,37 @@ def run(workbook_path: Path, **_ignored) -> None:
     # don't have pywinauto installed yet.
     from pywinauto import Application as UIApp
 
-    with excel_com.excel_session(visible=True) as app:
-        with excel_com.open_workbook(app, workbook_path,
-                                     read_only=False, save_on_close=True):
-            wb = app.ActiveWorkbook
+    # Native subprocess launch (NOT win32.Dispatch) so Prophix loads.
+    app, wb = _launch_excel_natively(workbook_path, log)
+    try:
+        try:
             wb.Worksheets("Units Bookings DV").Activate()
             log.info("Activated tab: Units Bookings DV")
+        except Exception as e:
+            log.warning("Could not activate Units Bookings DV: %s", e)
 
-            _bring_excel_to_front(app, log)
-            _ensure_excel_maximized(app, log)
+        _bring_excel_to_front(app, log)
+        _ensure_excel_maximized(app, log)
 
-            # Excel launched via COM doesn't auto-load every add-in the
-            # same way a double-click launch does. Prophix Analyzer CV2
-            # in particular can be absent from COMAddIns until we give
-            # it time to initialize (and/or click the Insert tab).
-            _wait_for_addins_to_load(app, log, wait_seconds=15)
+        # Even with a native launch, give add-ins a moment to register
+        # and log what's present for diagnostics.
+        _wait_for_addins_to_load(app, log, wait_seconds=10)
 
-            ui = UIApp(backend="uia").connect(class_name="XLMAIN", timeout=15)
-            main = ui.top_window()
+        ui = UIApp(backend="uia").connect(class_name="XLMAIN", timeout=20)
+        main = ui.top_window()
 
-            _open_analyzer_pane(app, main, log)
+        _open_analyzer_pane(app, main, log)
 
-            # Give the Prophix pane a few seconds to populate its UIA
-            # subtree (refresh button etc.) before we try to click it.
-            time.sleep(4.0)
+        # Give the Prophix pane time to populate its UIA subtree before
+        # we walk it looking for the Refresh split-button.
+        time.sleep(4.0)
 
-            _click_refresh_all_sheets(main, log)
+        _click_refresh_all_sheets(main, log)
 
-            log.info("Sleeping %d seconds for Prophix refresh to complete",
-                     config.PROPHIX_WAIT_SECONDS)
-            time.sleep(config.PROPHIX_WAIT_SECONDS)
-            log.info("Sleep complete; saving workbook")
+        log.info("Sleeping %d seconds for Prophix refresh to complete",
+                 config.PROPHIX_WAIT_SECONDS)
+        time.sleep(config.PROPHIX_WAIT_SECONDS)
+        log.info("Sleep complete; saving workbook")
+    finally:
+        _shutdown_excel(app, wb, log)
     log.info("Step 4 complete")
