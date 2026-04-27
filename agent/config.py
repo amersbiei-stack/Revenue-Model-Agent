@@ -15,16 +15,31 @@ from pathlib import Path
 # Project root is inferred from this file's location: agent/config.py -> parent is project root.
 # config.json must live at the project root. Users can override the project_root inside the JSON
 # if they move the folder without moving the agent source (unusual but supported).
+#
+# config.json is gitignored (per-user). On first run we auto-copy
+# config.example.json -> config.json so a freshly-downloaded repo just works
+# without any manual file shuffling.
+
+import shutil
 
 _CODE_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _CONFIG_JSON_PATH = _CODE_PROJECT_ROOT / "config.json"
+_CONFIG_EXAMPLE_PATH = _CODE_PROJECT_ROOT / "config.example.json"
 
 if not _CONFIG_JSON_PATH.exists():
-    raise FileNotFoundError(
-        f"Missing {_CONFIG_JSON_PATH}.\n"
-        f"  Copy {_CODE_PROJECT_ROOT / 'config.example.json'} to config.json "
-        f"and fill in the machine-specific values. See SETUP.md."
-    )
+    if _CONFIG_EXAMPLE_PATH.exists():
+        shutil.copy2(_CONFIG_EXAMPLE_PATH, _CONFIG_JSON_PATH)
+        print(
+            f"[config] Created {_CONFIG_JSON_PATH.name} from "
+            f"{_CONFIG_EXAMPLE_PATH.name}. Edit config.json to customize "
+            f"per-machine values; subsequent ZIP downloads will not overwrite it."
+        )
+    else:
+        raise FileNotFoundError(
+            f"Missing both {_CONFIG_JSON_PATH} and {_CONFIG_EXAMPLE_PATH}.\n"
+            f"  Re-download the project from GitHub or create config.json manually. "
+            f"See SETUP.md."
+        )
 
 with open(_CONFIG_JSON_PATH, "r", encoding="utf-8") as _f:
     _cfg: dict = json.load(_f)

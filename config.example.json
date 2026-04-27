@@ -1,11 +1,11 @@
 {
-  "_comment": "Template for a fresh machine. Copy this file to config.json and fill in the values marked <REPLACE_ME>. See SETUP.md.",
+  "_comment": "Default configuration for the Revenue Model agent. On first run the agent auto-copies this file to config.json if it doesn't already exist. Edit config.json (NOT this file) to change machine-specific values; this template stays in the repo as a safe starting point. See SETUP.md.",
 
-  "project_root": "<REPLACE_ME: absolute path to the Revenue Model folder, e.g. C:\\Users\\yourname\\Documents\\Revenue Model>",
+  "project_root": "C:\\Users\\asbiei\\OneDrive - Prophix Software, Inc\\Revenue Operations -  Analytics - Documents\\1. Sales and Marketing\\1.0 Reporting\\1.0 Models & Analysis, workbooks\\2.0 Sales Models\\Revenue Model - Internal",
   "archive_dir": null,
   "log_dir": null,
 
-  "email_recipient": "<REPLACE_ME: email address that receives failure/variance alerts, e.g. asbiei@prophix.com>",
+  "email_recipient": "asbiei@prophix.com",
 
   "prophix_wait_seconds": 600,
 
