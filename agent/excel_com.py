@@ -33,25 +33,46 @@ def unblock_file(path: Path, log) -> None:
     """Remove the Zone.Identifier alternate data stream from a file.
 
     Office's 'Block macros from the Internet' policy disables VBA in any
-    .xlsm carrying Mark of the Web — even when AutomationSecurity=Low.
-    Stripping the ADS lets the macro run again. Idempotent: silently
-    no-op if there's no MOTW to remove.
+    .xlsm carrying Mark of the Web — even when AutomationSecurity=Low —
+    and OneDrive-synced files often acquire MOTW after sync round-trips.
+
+    Tries os.unlink on the :Zone.Identifier ADS first (works for paths
+    Python can canonicalize). Falls back to PowerShell's Unblock-File
+    cmdlet, which handles paths with spaces, commas, parens, etc. that
+    break the cmd.exe `del` syntax. Idempotent: silently no-op if there's
+    no MOTW to remove.
     """
+    import os
     ads_path = f"{path}:Zone.Identifier"
+
+    # 1. Native Python — works on most modern Windows Python builds.
     try:
-        # `del` on the ADS path; using cmd.exe because del's ADS-aware.
+        os.unlink(ads_path)
+        log.info("Stripped Mark of the Web from %s (os.unlink)", path.name)
+        return
+    except FileNotFoundError:
+        log.debug("No MOTW on %s (nothing to strip)", path.name)
+        return
+    except OSError as e:
+        log.debug("os.unlink ADS failed: %s; trying PowerShell", e)
+
+    # 2. PowerShell Unblock-File — robust against weird path chars.
+    try:
         result = subprocess.run(
-            ["cmd", "/c", "del", "/f", ads_path],
-            capture_output=True, text=True, timeout=10,
+            [
+                "powershell", "-NoProfile", "-NonInteractive",
+                "-Command",
+                f"Unblock-File -LiteralPath \"{path}\"",
+            ],
+            capture_output=True, text=True, timeout=20,
         )
         if result.returncode == 0:
-            log.info("Stripped Mark of the Web from %s", path.name)
+            log.info("Stripped Mark of the Web from %s (PowerShell)", path.name)
         else:
-            # rc=2 typically means the ADS didn't exist; not an error.
-            log.debug("unblock-file: rc=%d stderr=%r", result.returncode,
-                      result.stderr.strip())
+            log.debug("PowerShell Unblock-File: rc=%d stderr=%r",
+                      result.returncode, result.stderr.strip())
     except Exception as e:
-        log.warning("unblock-file failed (continuing anyway): %s", e)
+        log.warning("PowerShell Unblock-File failed (continuing anyway): %s", e)
 
 
 def ensure_trusted_location(folder_path: Path, log) -> bool:
